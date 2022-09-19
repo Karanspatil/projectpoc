@@ -1,0 +1,65 @@
+import sys
+import pandas
+from awsglue.transforms import *
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from pyspark.sql.functions import *
+from pyspark.sql.types import *
+from pyspark.sql import SparkSession
+spark = SparkSession.builder.getOrCreate()
+args = getResolvedOptions(sys.argv, ["file","buck"])
+file_name=args['file']
+bucket_name=args['buck']
+input_file_path="s3a://{}/{}".format(bucket_name,file_name)
+output="s3a://{}/{}".format(bucket_name,"/ProjectGlueOutputfile/bankcleandata")
+
+df = spark.read.format("csv").option("header", True).option("inferSchema", False).load(input_file_path)
+print('length of data is', df.count())
+#select neccesary columns and convert string column to data column
+df1 = df.select('Date','Stars',"Reviews").withColumn("Date",to_date(col("Date"),'dd-MM-yyyy')).cache()
+df1.printSchema()
+#checking for null values
+#nn=df1.filter(col("Reviews").isNull())
+#print(nn.count())
+
+df1.fillna({"Date":"no date","Reviews":"no review"})
+#Remove all posible special characters and punctuation characters
+# like(question mark, exclamation point, comma, colon, semicolon, dash, hyphen, brackets, braces,
+# parentheses, apostrophe, quotation markand   and Make Reviews text in lower case
+#df2=df1.withColumn("Reviews",regexp_replace(col("Reviews"),"([^a-zA-Z' '])",''))
+#but apostrophe problem(not removed ....go to 2nd method
+df2=df1.withColumn("Reviews",translate(col('Reviews'),'''~`".'!@$#%^&()�_-+=={}[]:;<,>?/*''',"")).\
+    withColumn("Reviews",lower(col("Reviews"))).cache()
+
+#What are stop words? 🤔
+# The words which are filtered out before processing a natural language(nlp) are called stop words.
+stopwordlist = ['a', 'about', 'above', 'after', 'again', 'ain', 'all', 'am', 'an',
+             'and','any','are', 'as', 'at', 'be', 'because', 'been', 'before',
+             'being', 'below', 'between','both', 'by', 'can', 'd', 'did', 'do',
+             'does', 'doing', 'down', 'during', 'each','few', 'for', 'from',
+             'further', 'had', 'has', 'have', 'having', 'he', 'her', 'here',
+             'hers', 'herself', 'him', 'himself', 'his', 'how', 'i', 'if', 'in',
+             'into','is', 'it', 'its', 'itself', 'just', 'll', 'm', 'ma',
+             'me', 'more', 'most','my', 'myself', 'now', 'o', 'of', 'on', 'once',
+             'only', 'or', 'other', 'our', 'ours','ourselves', 'out', 'own', 're','s', 'same', 'she', "shes", 'should', "shouldve",'so', 'some', 'such',
+             't', 'than', 'that', "thatll", 'the', 'their', 'theirs', 'them',
+             'themselves', 'then', 'there', 'these', 'they', 'this', 'those',
+             'through', 'to', 'too','under', 'until', 'up', 've', 'very', 'was',
+             'we', 'were', 'what', 'when', 'where','which','while', 'who', 'whom',
+             'why', 'will', 'with', 'won', 'y', 'you', "youd","youll", "youre",
+             "youve", 'your', 'yours', 'yourself', 'yourselves']
+#Cleaning and removing the above stop words list from the Reviews text
+def cleaning_stop_word(text):
+    return ' '.join([word for word in str(text).split() if word not in stopwordlist])
+cleanstopword=udf(cleaning_stop_word)
+df3=df2.withColumn("Reviews",cleanstopword(col("Reviews"))).cache()
+
+#Cleaning and removing Numeric numbers
+df4=df3.withColumn("Reviews",regexp_replace(col("Reviews"),'[0-9]+',''))
+df5=df4.withColumn("Reviews",regexp_replace(col("Reviews"),'((www.[^s]+)|(https://[^s]+))|(https?://[^s]+)',''))
+df5.show(truncate=False)
+#write to s3
+#df5.toPandas().to_csv(output)
+df5.coalesce(1).write.mode("append").format("csv").option("header", "true").save(output)
